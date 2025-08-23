@@ -13,7 +13,8 @@ This MCP server implements three powerful tools for C/C++ development:
 ## Prerequisites
 
 - .NET 9.0 or later
-- Windows x64 (for libclang native dependencies)
+- Supported platforms: Windows (x64), Linux (x64), macOS (x64/ARM64)
+- Appropriate libclang native dependencies for your platform
 
 ## Installation
 
@@ -86,6 +87,34 @@ curl -X POST http://localhost:3000/mcp \
       "name": "compile_cpp",
       "arguments": {
         "sourceCode": "int main() { return 0; }"
+      }
+    }
+  }'
+```
+
+### Linux-specific Usage
+
+The server works identically on Linux systems:
+
+```bash
+# On Linux: Start in stdio mode
+./TryClangMcpServer
+
+# On Linux: Start in HTTP mode
+./TryClangMcpServer --http --port 3000
+
+# Test on Linux using curl
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "compile_cpp",
+      "arguments": {
+        "sourceCode": "#include <iostream>\nint main() { std::cout << \"Hello Linux!\" << std::endl; return 0; }",
+        "options": "-std=c++17 -Wall"
       }
     }
   }'
@@ -187,14 +216,24 @@ TryClangMcpServer/
 ### Building and Testing
 
 ```bash
-# Build the solution
+# Build the solution (cross-platform)
 dotnet build
 
-# Run tests (requires libclang native libraries)
+# Build for specific platform
+dotnet build --runtime win-x64
+dotnet build --runtime linux-x64
+dotnet build --runtime osx-x64
+dotnet build --runtime osx-arm64
+
+# Run tests (requires libclang native libraries for your platform)
 dotnet test
 
 # Build for release
 dotnet build --configuration Release
+
+# Publish self-contained executable for specific platform
+dotnet publish --configuration Release --runtime linux-x64 --self-contained
+dotnet publish --configuration Release --runtime win-x64 --self-contained
 ```
 
 ### Architecture
@@ -224,7 +263,10 @@ Key architectural features:
 - ClangSharp 20.1.2
 - ClangSharp.Interop 20.1.2
 - libclang 20.1.2
-- libclang.runtime.win-x64 20.1.2 (Windows)
+- libclang.runtime.win-x64 20.1.2 (Windows x64)
+- libclang.runtime.linux-x64 20.1.2 (Linux x64)
+- libclang.runtime.osx-x64 20.1.2 (macOS x64)
+- libclang.runtime.osx-arm64 20.1.2 (macOS ARM64)
 - ModelContextProtocol 0.3.0-preview.4
 - Microsoft.Extensions.Hosting 9.0.8
 
@@ -254,6 +296,7 @@ For issues and questions:
 
 ## Limitations
 
-- Currently optimized for Windows x64 due to libclang native dependencies
-- Requires appropriate libclang runtime libraries to be available
+- Requires appropriate libclang runtime libraries for the target platform
 - Static analysis features depend on Clang Static Analyzer capabilities
+- Some compiler-specific features may vary between platforms (Windows/Linux/macOS)
+- Resource limits and security filtering may require adjustment for different environments

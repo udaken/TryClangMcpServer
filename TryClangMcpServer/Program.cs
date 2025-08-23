@@ -297,7 +297,18 @@ public static class ClangConstants
         "-fplugin", "-load",
         
         // External command execution
-        "-B", "--prefix", "-specs"
+        "-B", "--prefix", "-specs",
+        
+        // Linux-specific dangerous options
+        "-rpath", "--rpath", "-soname", "--soname",
+        "-shared", "--shared", "-static", "--static",
+        "-pie", "-no-pie", "-fpic", "-fPIC", "-fpie", "-fPIE",
+        "-rdynamic", "--export-dynamic",
+        
+        // GCC/Linux specific system access
+        "-print-prog-name", "-print-file-name", "-print-libgcc-file-name",
+        "-print-search-dirs", "-print-multi-directory", "-print-multi-lib",
+        "-print-sysroot", "-print-sysroot-headers-suffix"
     };
 }
 

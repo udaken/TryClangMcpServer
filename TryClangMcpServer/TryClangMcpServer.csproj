@@ -6,13 +6,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="ClangSharp" Version="20.1.2" />
     <PackageReference Include="ClangSharp.Interop" Version="20.1.2" />
     <PackageReference Include="libclang" Version="20.1.2" />
-    <PackageReference Include="libclang.runtime.win-x64" Version="20.1.2" />
+    <PackageReference Include="libclang.runtime.win-x64" Version="20.1.2" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+    <PackageReference Include="libclang.runtime.linux-x64" Version="20.1.2" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+    <PackageReference Include="libclang.runtime.osx-x64" Version="20.1.2" Condition="$([MSBuild]::IsOSPlatform('OSX')) And $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) == 'X64'" />
+    <PackageReference Include="libclang.runtime.osx-arm64" Version="20.1.2" Condition="$([MSBuild]::IsOSPlatform('OSX')) And $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) == 'Arm64'" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.8" />
     <PackageReference Include="ModelContextProtocol" Version="0.3.0-preview.4" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="0.3.0-preview.4" />
