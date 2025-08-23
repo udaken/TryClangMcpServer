@@ -1,188 +1,450 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
+using ModelContextProtocol.AspNetCore;
 using System.ComponentModel;
 using System.Text;
+using System.Text.Json;
 using ClangSharp;
 using ClangSharp.Interop;
 
-var builder = Host.CreateApplicationBuilder(args);
-builder.Logging.AddConsole(consoleLogOptions =>
+// Check if HTTP mode is requested via command line argument
+var useHttpMode = args.Contains("--http");
+
+// Shared JSON options
+var JsonOptions = new JsonSerializerOptions 
+{ 
+    WriteIndented = true,
+    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+};
+
+if (useHttpMode)
 {
-    // Configure all logs to go to stderr
-    consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
-});
-builder.Services
-    .AddMcpServer()
-    .WithStdioServerTransport()
-    .WithToolsFromAssembly();
-await builder.Build().RunAsync();
+    // HTTP mode configuration
+    var builder = WebApplication.CreateBuilder(args);
+    
+    builder.Logging.AddConsole(consoleLogOptions =>
+    {
+        consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Information;
+    });
+    
+    // Add CORS
+    builder.Services.AddCors();
+    
+    // Add controllers for HTTP endpoints
+    builder.Services.AddControllers();
+    
+    // Add MCP server services
+    builder.Services
+        .AddMcpServer()
+        .WithToolsFromAssembly();
+    
+    var app = builder.Build();
+    
+    // Configure CORS for development
+    app.UseCors(policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+    
+    // Add health check endpoint
+    app.MapGet("/health", () => new { status = "healthy", timestamp = DateTime.UtcNow });
+    
+    // Add MCP endpoint for tools listing
+    app.MapPost("/mcp", async (HttpContext context) =>
+    {
+        try
+        {
+            using var reader = new StreamReader(context.Request.Body);
+            var requestBody = await reader.ReadToEndAsync();
+            var jsonDoc = JsonDocument.Parse(requestBody);
+            
+            if (jsonDoc.RootElement.TryGetProperty("method", out var methodProperty) &&
+                methodProperty.GetString() == "tools/list")
+            {
+                var toolsResponse = new
+                {
+                    jsonrpc = "2.0",
+                    id = jsonDoc.RootElement.TryGetProperty("id", out var idProp) ? idProp.GetInt32() : 1,
+                    result = new
+                    {
+                        tools = new[]
+                        {
+                            new
+                            {
+                                name = "compile_cpp",
+                                description = "Compiles C/C++ code with various options and returns diagnostics",
+                                inputSchema = new
+                                {
+                                    type = "object",
+                                    properties = new
+                                    {
+                                        sourceCode = new { type = "string", description = "The C/C++ source code to compile" },
+                                        options = new { type = "string", description = "Compiler options (optional)" }
+                                    },
+                                    required = new[] { "sourceCode" }
+                                }
+                            },
+                            new
+                            {
+                                name = "analyze_cpp",
+                                description = "Performs static analysis using Clang Static Analyzer",
+                                inputSchema = new
+                                {
+                                    type = "object",
+                                    properties = new
+                                    {
+                                        sourceCode = new { type = "string", description = "The C/C++ source code to analyze" },
+                                        options = new { type = "string", description = "Analysis options (optional)" }
+                                    },
+                                    required = new[] { "sourceCode" }
+                                }
+                            },
+                            new
+                            {
+                                name = "get_ast",
+                                description = "Generates Abstract Syntax Trees in multiple formats",
+                                inputSchema = new
+                                {
+                                    type = "object",
+                                    properties = new
+                                    {
+                                        sourceCode = new { type = "string", description = "The C/C++ source code to parse" },
+                                        options = new { type = "string", description = "Parser options (optional)" }
+                                    },
+                                    required = new[] { "sourceCode" }
+                                }
+                            }
+                        }
+                    }
+                };
+                
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync(JsonSerializer.Serialize(toolsResponse, JsonOptions));
+                return;
+            }
+            
+            // Handle tool calls
+            if (jsonDoc.RootElement.TryGetProperty("method", out var toolMethod) &&
+                toolMethod.GetString() == "tools/call")
+            {
+                var paramsElement = jsonDoc.RootElement.GetProperty("params");
+                var toolName = paramsElement.GetProperty("name").GetString();
+                var arguments = paramsElement.GetProperty("arguments");
+                
+                string result = toolName switch
+                {
+                    "compile_cpp" => await Clang.CompileCpp(
+                        arguments.GetProperty("sourceCode").GetString() ?? "",
+                        arguments.TryGetProperty("options", out var opts) ? opts.GetString() ?? "" : ""),
+                    "analyze_cpp" => await Clang.AnalyzeCpp(
+                        arguments.GetProperty("sourceCode").GetString() ?? "",
+                        arguments.TryGetProperty("options", out var opts2) ? opts2.GetString() ?? "" : ""),
+                    "get_ast" => await Clang.GetAst(
+                        arguments.GetProperty("sourceCode").GetString() ?? "",
+                        arguments.TryGetProperty("options", out var opts3) ? opts3.GetString() ?? "" : ""),
+                    _ => throw new ArgumentException($"Unknown tool: {toolName}")
+                };
+                
+                var toolResponse = new
+                {
+                    jsonrpc = "2.0",
+                    id = jsonDoc.RootElement.TryGetProperty("id", out var idProp2) ? idProp2.GetInt32() : 1,
+                    result = new
+                    {
+                        content = new[]
+                        {
+                            new
+                            {
+                                type = "text",
+                                text = result
+                            }
+                        }
+                    }
+                };
+                
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync(JsonSerializer.Serialize(toolResponse, JsonOptions));
+                return;
+            }
+            
+            // Default error response
+            context.Response.StatusCode = 400;
+            await context.Response.WriteAsync("{\"error\":\"Unsupported method\"}");
+        }
+        catch (Exception ex)
+        {
+            context.Response.StatusCode = 500;
+            await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }, JsonOptions));
+        }
+    });
+    
+    var port = GetPortFromArgs(args) ?? 3000;
+    app.Urls.Add($"http://localhost:{port}");
+    
+    Console.WriteLine($"🚀 MCP Server running in HTTP mode on http://localhost:{port}");
+    Console.WriteLine("📋 Available endpoints:");
+    Console.WriteLine($"  • Health: GET http://localhost:{port}/health");
+    Console.WriteLine($"  • Tools: POST http://localhost:{port}/mcp");
+    Console.WriteLine("📝 Example requests:");
+    Console.WriteLine("  • List tools: POST /mcp with {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    Console.WriteLine("  • Call tool: POST /mcp with {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"compile_cpp\",\"arguments\":{\"sourceCode\":\"int main(){return 0;}\"}}}");
+    
+    await app.RunAsync();
+}
+else
+{
+    // Stdio mode configuration (default)
+    var builder = Host.CreateApplicationBuilder(args);
+    
+    builder.Logging.AddConsole(consoleLogOptions =>
+    {
+        // Configure all logs to go to stderr for stdio mode
+        consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
+    });
+    
+    builder.Services
+        .AddMcpServer()
+        .WithStdioServerTransport()
+        .WithToolsFromAssembly();
+        
+    await builder.Build().RunAsync();
+}
+
+static int? GetPortFromArgs(string[] args)
+{
+    for (int i = 0; i < args.Length - 1; i++)
+    {
+        if (args[i] == "--port" && int.TryParse(args[i + 1], out var port))
+        {
+            return port;
+        }
+    }
+    return null;
+}
+
+/// <summary>
+/// Configuration constants for Clang operations
+/// </summary>
+public static class ClangConstants
+{
+    public const int MaxAstDepth = 10;
+    public const string DefaultSourceFileName = "source.cpp";
+    public const int CleanupRetryAttempts = 3;
+    public const int CleanupDelayMs = 100;
+    public const int MaxSourceCodeSizeBytes = 1_000_000; // 1MB
+    
+    public static readonly string[] DangerousOptions = 
+    {
+        "-o", "--output", "-include", "-I", "--include-directory",
+        "--sysroot", "-isysroot", "-working-directory"
+    };
+}
+
+/// <summary>
+/// Represents the type of Clang operation to perform
+/// </summary>
+public enum ClangOperation
+{
+    Compile,
+    Analyze, 
+    GenerateAST
+}
+
+/// <summary>
+/// Represents an AST node with strongly-typed properties
+/// </summary>
+public record AstNode(string Kind, string Spelling, uint Line, uint Column)
+{
+    public List<AstNode> Children { get; init; } = new();
+}
 
 [McpServerToolType]
 public static class Clang
 {
-    private static readonly ILogger Logger = LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger<object>();
+    private static ILogger? _logger;
+    private static ILogger Logger => _logger ??= 
+        LoggerFactory.Create(b => b.AddConsole()).CreateLogger<object>();
+
+    private static readonly JsonSerializerOptions JsonOptions = new() 
+    { 
+        WriteIndented = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     [McpServerTool, Description("Compiles C/C++ code with various options and returns diagnostics")]
-    public static string CompileCpp(string sourceCode, string options = "")
+    public static async Task<string> CompileCpp(string sourceCode, string options = "")
     {
-        try
-        {
-            // Create temporary file for source code
-            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempDir);
-            
-            var sourceFile = Path.Combine(tempDir, "source.cpp");
-            File.WriteAllText(sourceFile, sourceCode, Encoding.UTF8);
-            
-            // Parse compilation options
-            var args = ParseOptions(options);
-            args = [sourceFile, .. args];
-            
-            // Create compilation unit
-            var index = CXIndex.Create();
-            var translationUnit = CXTranslationUnit.Parse(index, sourceFile, args, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
-            
-            if (translationUnit.Handle == IntPtr.Zero)
-            {
-                return CreateErrorResult("Failed to create translation unit");
-            }
-            
-            // Get diagnostics
-            var diagnostics = GetDiagnostics(translationUnit);
-            var compilationResult = new
-            {
-                success = diagnostics.errors == 0,
-                errors = diagnostics.errors,
-                warnings = diagnostics.warnings,
-                diagnostics = diagnostics.messages,
-                sourceFile = "source.cpp"
-            };
-            
-            // Cleanup
-            translationUnit.Dispose();
-            index.Dispose();
-            Directory.Delete(tempDir, true);
-            
-            return System.Text.Json.JsonSerializer.Serialize(compilationResult, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Error compiling C++ code");
-            return CreateErrorResult($"Compilation error: {ex.Message}");
-        }
+        return await ExecuteClangOperationAsync(sourceCode, options, ClangOperation.Compile, "compilation");
     }
 
     [McpServerTool, Description("Performs static analysis using Clang Static Analyzer.")]
-    public static string AnalyzeCpp(string sourceCode, string options = "")
+    public static async Task<string> AnalyzeCpp(string sourceCode, string options = "")
     {
-        try
-        {
-            // Create temporary file for source code
-            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-            Directory.CreateDirectory(tempDir);
-            
-            var sourceFile = Path.Combine(tempDir, "source.cpp");
-            File.WriteAllText(sourceFile, sourceCode, Encoding.UTF8);
-            
-            // Parse analysis options
-            var args = ParseOptions(options);
-            args = [sourceFile, .. args, "--analyze"];
-            
-            // Create compilation unit with static analysis
-            var index = CXIndex.Create();
-            var translationUnit = CXTranslationUnit.Parse(index, sourceFile, args, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
-            
-            if (translationUnit.Handle == IntPtr.Zero)
-            {
-                return CreateErrorResult("Failed to create translation unit for analysis");
-            }
-            
-            // Get analysis results (diagnostics)
-            var diagnostics = GetDiagnostics(translationUnit);
-            var analysisResult = new
-            {
-                success = true,
-                issues = diagnostics.errors + diagnostics.warnings,
-                findings = diagnostics.messages,
-                sourceFile = "source.cpp"
-            };
-            
-            // Cleanup
-            translationUnit.Dispose();
-            index.Dispose();
-            Directory.Delete(tempDir, true);
-            
-            return System.Text.Json.JsonSerializer.Serialize(analysisResult, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Error analyzing C++ code");
-            return CreateErrorResult($"Analysis error: {ex.Message}");
-        }
+        return await ExecuteClangOperationAsync(sourceCode, options, ClangOperation.Analyze, "analysis");
     }
     
     [McpServerTool, Description("Generates Abstract Syntax Trees in multiple formats.")]
-    public static string GetAst(string sourceCode, string options = "")
+    public static async Task<string> GetAst(string sourceCode, string options = "")
     {
+        return await ExecuteClangOperationAsync(sourceCode, options, ClangOperation.GenerateAST, "AST generation");
+    }
+
+    /// <summary>
+    /// Executes a Clang operation with proper resource management and error handling
+    /// </summary>
+    private static async Task<string> ExecuteClangOperationAsync(
+        string sourceCode, 
+        string options, 
+        ClangOperation operation,
+        string operationName)
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        
         try
         {
-            // Create temporary file for source code
-            var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+            // Validate inputs
+            ValidateSourceCode(sourceCode);
+            var args = ValidateAndParseOptions(options);
+
+            // Setup temporary directory and file
             Directory.CreateDirectory(tempDir);
+            var sourceFile = Path.Combine(tempDir, ClangConstants.DefaultSourceFileName);
+            await File.WriteAllTextAsync(sourceFile, sourceCode, Encoding.UTF8);
             
-            var sourceFile = Path.Combine(tempDir, "source.cpp");
-            File.WriteAllText(sourceFile, sourceCode, Encoding.UTF8);
+            // Prepare arguments based on operation
+            args = operation == ClangOperation.Analyze 
+                ? [sourceFile, .. args, "--analyze"] 
+                : [sourceFile, .. args];
             
-            // Parse AST options
-            var args = ParseOptions(options);
-            args = [sourceFile, .. args];
-            
-            // Create compilation unit
-            var index = CXIndex.Create();
-            var translationUnit = CXTranslationUnit.Parse(index, sourceFile, args, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
+            // Execute Clang operation with proper resource management
+            using var index = CXIndex.Create();
+            using var translationUnit = CXTranslationUnit.Parse(
+                index, sourceFile, args, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
             
             if (translationUnit.Handle == IntPtr.Zero)
             {
-                return CreateErrorResult("Failed to create translation unit for AST generation");
+                Logger.LogError("Failed to create translation unit for {Operation}", operationName);
+                return CreateErrorResult($"Failed to create translation unit for {operationName}");
             }
             
-            // Generate AST
-            var astNodes = new List<object>();
-            var cursor = translationUnit.Cursor;
-            
-            VisitAST(cursor, astNodes, 0);
-            
-            var astResult = new
+            // Generate result based on operation type
+            var result = operation switch
             {
-                success = true,
-                sourceFile = "source.cpp",
-                ast = astNodes
+                ClangOperation.Compile => CreateCompilationResult(translationUnit),
+                ClangOperation.Analyze => CreateAnalysisResult(translationUnit),
+                ClangOperation.GenerateAST => await CreateAstResultAsync(translationUnit),
+                _ => throw new ArgumentException($"Unknown operation: {operation}", nameof(operation))
             };
             
-            // Cleanup
-            translationUnit.Dispose();
-            index.Dispose();
-            Directory.Delete(tempDir, true);
-            
-            return System.Text.Json.JsonSerializer.Serialize(astResult, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            Logger.LogDebug("{Operation} completed successfully", operationName);
+            return JsonSerializer.Serialize(result, JsonOptions);
+        }
+        catch (ArgumentException ex)
+        {
+            Logger.LogWarning(ex, "Invalid input for {Operation}", operationName);
+            return CreateErrorResult($"Invalid input: {ex.Message}");
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error generating AST");
-            return CreateErrorResult($"AST generation error: {ex.Message}");
+            Logger.LogError(ex, "Error during {Operation}", operationName);
+            return CreateErrorResult($"{operationName} error: {ex.Message}");
+        }
+        finally
+        {
+            await CleanupDirectoryAsync(tempDir);
         }
     }
-    
-    private static string[] ParseOptions(string options)
+
+    /// <summary>
+    /// Validates source code input
+    /// </summary>
+    private static void ValidateSourceCode(string sourceCode)
+    {
+        if (string.IsNullOrWhiteSpace(sourceCode))
+            throw new ArgumentException("Source code cannot be null or empty", nameof(sourceCode));
+        
+        if (Encoding.UTF8.GetByteCount(sourceCode) > ClangConstants.MaxSourceCodeSizeBytes)
+            throw new ArgumentException($"Source code too large (max {ClangConstants.MaxSourceCodeSizeBytes / 1024}KB)", nameof(sourceCode));
+    }
+
+    /// <summary>
+    /// Validates and parses compiler options, filtering out dangerous ones
+    /// </summary>
+    private static string[] ValidateAndParseOptions(string options)
     {
         if (string.IsNullOrWhiteSpace(options))
-            return [];
+            return Array.Empty<string>();
             
-        return options.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var parsed = options.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        
+        // Check for dangerous options
+        var dangerousOption = parsed.FirstOrDefault(opt => 
+            ClangConstants.DangerousOptions.Any(dangerous => 
+                opt.StartsWith(dangerous, StringComparison.OrdinalIgnoreCase)));
+                
+        if (dangerousOption != null)
+            throw new ArgumentException($"Potentially dangerous compiler option detected: {dangerousOption}");
+            
+        return parsed;
+    }
+
+    /// <summary>
+    /// Creates compilation result object
+    /// </summary>
+    private static object CreateCompilationResult(CXTranslationUnit translationUnit)
+    {
+        var diagnostics = GetDiagnostics(translationUnit);
+        return new
+        {
+            Success = diagnostics.errors == 0,
+            Errors = diagnostics.errors,
+            Warnings = diagnostics.warnings,
+            Diagnostics = diagnostics.messages,
+            SourceFile = ClangConstants.DefaultSourceFileName
+        };
+    }
+
+    /// <summary>
+    /// Creates analysis result object
+    /// </summary>
+    private static object CreateAnalysisResult(CXTranslationUnit translationUnit)
+    {
+        var diagnostics = GetDiagnostics(translationUnit);
+        return new
+        {
+            Success = true,
+            Issues = diagnostics.errors + diagnostics.warnings,
+            Findings = diagnostics.messages,
+            SourceFile = ClangConstants.DefaultSourceFileName
+        };
+    }
+
+    /// <summary>
+    /// Creates AST result object asynchronously
+    /// </summary>
+    private static async Task<object> CreateAstResultAsync(CXTranslationUnit translationUnit)
+    {
+        var astNodes = new List<AstNode>();
+        var cursor = translationUnit.Cursor;
+        
+        await Task.Run(() => VisitAST(cursor, astNodes, 0));
+        
+        return new
+        {
+            Success = true,
+            SourceFile = ClangConstants.DefaultSourceFileName,
+            Ast = astNodes
+        };
     }
     
+    /// <summary>
+    /// Extracts diagnostics from translation unit with proper resource management
+    /// </summary>
     private static (int errors, int warnings, List<object> messages) GetDiagnostics(CXTranslationUnit translationUnit)
     {
         var messages = new List<object>();
@@ -197,15 +459,15 @@ public static class Clang
             var location = diagnostic.Location;
             
             location.GetFileLocation(out var file, out var line, out var column, out _);
-            var fileName = file.Name.CString;
+            var fileName = file.Name.CString ?? ClangConstants.DefaultSourceFileName;
             
             var diagnosticInfo = new
             {
-                severity = severity.ToString(),
-                message,
-                file = fileName,
-                line,
-                column
+                Severity = severity.ToString(),
+                Message = message ?? "Unknown error",
+                File = fileName,
+                Line = line,
+                Column = column
             };
             
             messages.Add(diagnosticInfo);
@@ -219,44 +481,77 @@ public static class Clang
         return (errors, warnings, messages);
     }
     
-    private static void VisitAST(CXCursor cursor, List<object> nodes, int depth)
+    /// <summary>
+    /// Visits AST nodes recursively with proper type safety
+    /// </summary>
+    private static void VisitAST(CXCursor cursor, List<AstNode> nodes, int depth)
     {
-        if (depth > 10) // Prevent infinite recursion
+        if (depth > ClangConstants.MaxAstDepth) 
+        {
+            Logger.LogDebug("Maximum AST depth reached, stopping traversal");
             return;
+        }
             
         var kind = cursor.Kind;
-        var spelling = cursor.Spelling.CString;
+        var spelling = cursor.Spelling.CString ?? string.Empty;
         cursor.Location.GetFileLocation(out _, out var line, out var column, out _);
         
-        var node = new
-        {
-            kind = kind.ToString(),
-            spelling,
-            line,
-            column,
-            children = new List<object>()
-        };
-        
+        var node = new AstNode(kind.ToString(), spelling, line, column);
         nodes.Add(node);
         
         unsafe
         {
             cursor.VisitChildren((child, parent, data) =>
             {
-                var childNodes = (List<object>)((dynamic)node).children;
-                VisitAST(child, childNodes, depth + 1);
+                VisitAST(child, node.Children, depth + 1);
                 return CXChildVisitResult.CXChildVisit_Continue;
             }, default(CXClientData));
         }
     }
+
+    /// <summary>
+    /// Safely cleans up temporary directory with retry logic
+    /// </summary>
+    private static async Task CleanupDirectoryAsync(string directory)
+    {
+        if (!Directory.Exists(directory)) 
+            return;
+        
+        for (int attempts = 0; attempts < ClangConstants.CleanupRetryAttempts; attempts++)
+        {
+            try
+            {
+                Directory.Delete(directory, true);
+                Logger.LogDebug("Successfully cleaned up temporary directory: {Directory}", directory);
+                return;
+            }
+            catch (IOException ex) when (attempts < ClangConstants.CleanupRetryAttempts - 1)
+            {
+                Logger.LogDebug(ex, "Failed to cleanup directory (attempt {Attempt}/{Total}), retrying...", 
+                    attempts + 1, ClangConstants.CleanupRetryAttempts);
+                await Task.Delay(ClangConstants.CleanupDelayMs);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to cleanup temporary directory: {Directory}", directory);
+                break;
+            }
+        }
+        
+        Logger.LogWarning("Failed to cleanup temporary directory after {Attempts} attempts: {Directory}", 
+            ClangConstants.CleanupRetryAttempts, directory);
+    }
     
+    /// <summary>
+    /// Creates a standardized error result
+    /// </summary>
     private static string CreateErrorResult(string message)
     {
         var errorResult = new
         {
-            success = false,
-            error = message
+            Success = false,
+            Error = message ?? "Unknown error occurred"
         };
-        return System.Text.Json.JsonSerializer.Serialize(errorResult, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        return JsonSerializer.Serialize(errorResult, JsonOptions);
     }
 }

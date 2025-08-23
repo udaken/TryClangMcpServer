@@ -37,16 +37,58 @@ dotnet build
 
 ### Running the MCP Server
 
+#### Stdio Mode (Default)
 Start the server using stdio transport:
 ```bash
 dotnet run
 ```
 
+#### HTTP Mode
+Start the server in HTTP mode for web-based access:
+```bash
+# Default port 3000
+dotnet run --http
+
+# Custom port
+dotnet run --http --port 8080
+```
+
 ### Testing the Server
 
+#### Stdio Mode Testing
 Test basic functionality:
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | dotnet run
+```
+
+#### HTTP Mode Testing
+Test health endpoint:
+```bash
+curl http://localhost:3000/health
+```
+
+List available tools:
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Call a tool:
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "compile_cpp",
+      "arguments": {
+        "sourceCode": "int main() { return 0; }"
+      }
+    }
+  }'
 ```
 
 ### MCP Tools
@@ -160,17 +202,21 @@ dotnet build --configuration Release
 The server is built using:
 
 - **ModelContextProtocol SDK** for MCP server implementation
+- **ASP.NET Core** for HTTP mode support
 - **ClangSharp 20.1.2** for LLVM/Clang integration
 - **Microsoft.Extensions.Hosting** for service hosting
 - **NUnit** for testing
 
 Key architectural features:
 
+- **Dual Transport Support**: Both stdio and HTTP transports supported
 - **Isolated Processing**: Each compilation uses temporary directories with GUID-based names
-- **Automatic Cleanup**: Temporary files and artifacts are automatically cleaned up
+- **Automatic Cleanup**: Temporary files and artifacts are automatically cleaned up with retry logic
 - **Comprehensive Error Handling**: All errors are caught and returned in consistent JSON format
 - **Thread-Safe Operations**: Concurrent tool invocations are safely handled
+- **Input Validation**: Security-focused validation prevents dangerous operations
 - **Detailed Logging**: Full logging support via Microsoft.Extensions.Logging
+- **CORS Support**: Cross-origin requests enabled for HTTP mode
 
 ## Dependencies
 
