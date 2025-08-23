@@ -43,12 +43,29 @@ if (useHttpMode)
     
     var app = builder.Build();
     
-    // Configure CORS for development
+    // Configure CORS with environment-aware security
     app.UseCors(policy =>
     {
-        policy.AllowAnyOrigin()
-              .AllowAnyMethod()
-              .AllowAnyHeader();
+        var isDevelopment = app.Environment.IsDevelopment();
+        
+        if (isDevelopment)
+        {
+            // Development: Allow localhost only
+            policy.WithOrigins("http://localhost:*", "https://localhost:*", 
+                              "http://127.0.0.1:*", "https://127.0.0.1:*")
+                  .SetIsOriginAllowedToAllowWildcardSubdomains()
+                  .AllowAnyMethod()
+                  .AllowAnyHeader()
+                  .AllowCredentials();
+        }
+        else
+        {
+            // Production: Strict CORS policy
+            policy.WithOrigins() // No origins allowed by default
+                  .WithMethods("POST") // Only POST for MCP
+                  .WithHeaders("Content-Type", "Accept")
+                  .DisallowCredentials();
+        }
     });
     
     // Add health check endpoint
@@ -178,8 +195,10 @@ if (useHttpMode)
         }
         catch (Exception ex)
         {
+            var logger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger<object>();
+            logger.LogError(ex, "HTTP request processing error: {Message}", ex.Message);
             context.Response.StatusCode = 500;
-            await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = ex.Message }, JsonOptions));
+            await context.Response.WriteAsync(JsonSerializer.Serialize(new { error = "Internal server error occurred" }, JsonOptions));
         }
     });
     
@@ -238,10 +257,47 @@ public static class ClangConstants
     public const int CleanupDelayMs = 100;
     public const int MaxSourceCodeSizeBytes = 1_000_000; // 1MB
     
+    // Security and resource limits
+    public const int MaxConcurrentOperations = 5;
+    public const int OperationTimeoutMs = 30_000; // 30 seconds
+    public const int RateLimitRequestsPerMinute = 60;
+    public const int MaxRequestsPerHour = 1000;
+    
     public static readonly string[] DangerousOptions = 
     {
+        // File system access
         "-o", "--output", "-include", "-I", "--include-directory",
-        "--sysroot", "-isysroot", "-working-directory"
+        "--sysroot", "-isysroot", "-working-directory",
+        
+        // System information leakage
+        "-march=native", "-mcpu=native", "-mtune=native",
+        "-pipe", "-v", "--verbose",
+        
+        // Preprocessor and dependency generation (can reveal system info)
+        "-M", "-MD", "-MM", "-MF", "-MP", "-MT", "-MQ", "-MMD",
+        
+        // Temporary file handling
+        "-save-temps", "--save-temps", "-save-temps=",
+        
+        // Target and architecture specification
+        "-target", "--target", "-mfloat-abi", "-mfpu",
+        
+        // External tools and scripts
+        "-x", "--language", "-Xclang", "-Xpreprocessor", "-Xlinker", "-Xassembler",
+        
+        // Debug and profiling (can leak info)
+        "-g", "-gdwarf", "-glldb", "-gsce", "-gcodeview",
+        "-pg", "-p", "--coverage", "-fprofile",
+        
+        // Linker options
+        "-l", "-L", "--library", "--library-path",
+        "-Wl,", "-Xlinker",
+        
+        // Plugin loading
+        "-fplugin", "-load",
+        
+        // External command execution
+        "-B", "--prefix", "-specs"
     };
 }
 
@@ -275,15 +331,19 @@ public static class Clang
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+    
+    // Semaphore to limit concurrent operations
+    private static readonly SemaphoreSlim ConcurrencyLimiter = 
+        new(ClangConstants.MaxConcurrentOperations, ClangConstants.MaxConcurrentOperations);
 
     [McpServerTool, Description("Compiles C/C++ code with various options and returns diagnostics")]
-    public static async Task<string> CompileCpp(string sourceCode, string options = "")
+    public static async Task<string> CompileCpp(string sourceCode, string options = "-std=c++20 -Wall -Wextra -pedantic")
     {
         return await ExecuteClangOperationAsync(sourceCode, options, ClangOperation.Compile, "compilation");
     }
 
     [McpServerTool, Description("Performs static analysis using Clang Static Analyzer.")]
-    public static async Task<string> AnalyzeCpp(string sourceCode, string options = "")
+    public static async Task<string> AnalyzeCpp(string sourceCode, string options = "-std=c++20 -Wall -Wextra -pedantic")
     {
         return await ExecuteClangOperationAsync(sourceCode, options, ClangOperation.Analyze, "analysis");
     }
@@ -303,6 +363,15 @@ public static class Clang
         ClangOperation operation,
         string operationName)
     {
+        // Wait for available slot (with timeout)
+        using var timeoutCts = new CancellationTokenSource(ClangConstants.OperationTimeoutMs);
+        
+        if (!await ConcurrencyLimiter.WaitAsync(5000, timeoutCts.Token)) // 5 second wait for slot
+        {
+            Logger.LogWarning("Operation {Operation} rejected due to concurrency limit", operationName);
+            return CreateErrorResult($"{operationName} temporarily unavailable due to high load");
+        }
+        
         var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         
         try
@@ -344,18 +413,25 @@ public static class Clang
             Logger.LogDebug("{Operation} completed successfully", operationName);
             return JsonSerializer.Serialize(result, JsonOptions);
         }
+        catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested)
+        {
+            Logger.LogWarning("Operation {Operation} timed out after {Timeout}ms", operationName, ClangConstants.OperationTimeoutMs);
+            return CreateErrorResult($"{operationName} operation timed out");
+        }
         catch (ArgumentException ex)
         {
-            Logger.LogWarning(ex, "Invalid input for {Operation}", operationName);
-            return CreateErrorResult($"Invalid input: {ex.Message}");
+            Logger.LogWarning(ex, "Invalid input for {Operation}: {Message}", operationName, ex.Message);
+            return CreateErrorResult($"Invalid input provided for {operationName}");
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Error during {Operation}", operationName);
-            return CreateErrorResult($"{operationName} error: {ex.Message}");
+            Logger.LogError(ex, "Error during {Operation}: {Message}", operationName, ex.Message);
+            return CreateErrorResult($"{operationName} operation failed due to an internal error");
         }
         finally
         {
+            // Always release the semaphore and cleanup
+            ConcurrencyLimiter.Release();
             await CleanupDirectoryAsync(tempDir);
         }
     }
