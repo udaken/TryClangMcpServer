@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  tryclangmcpserver:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:3000
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    
+  # Alternative configuration for stdio mode (for MCP client integration)
+  tryclangmcpserver-stdio:
+    build: .
+    stdin_open: true
+    tty: true
+    entrypoint: ["dotnet", "TryClangMcpServer.dll"]
+    restart: "no"
+    profiles:
+      - stdio

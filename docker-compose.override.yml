@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  tryclangmcpserver:
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - "3001:3000"  # Different port to avoid conflicts during development

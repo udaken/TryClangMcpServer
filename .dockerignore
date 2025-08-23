@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+CLAUDE.md
+*.md
+
+# IDE and editor files
+.vscode/
+.vs/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build output
+**/bin/
+**/obj/
+**/out/
+**/publish/
+
+# Test results
+TestResults/
+**/TestResults/
+
+# NuGet packages
+*.nupkg
+**/packages/
+
+# User-specific files
+*.user
+*.suo
+*.cache
+*.docstates
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (except Dockerfile itself)
+docker-compose*.yml
+.dockerignore

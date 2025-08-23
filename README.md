@@ -120,6 +120,45 @@ curl -X POST http://localhost:3000/mcp \
   }'
 ```
 
+### Docker Usage
+
+The server can be run in Docker containers for easy deployment:
+
+```bash
+# Build Docker image
+docker build -t tryclangmcpserver .
+
+# Run container in HTTP mode (default)
+docker run -p 3000:3000 tryclangmcpserver
+
+# Run with custom port
+docker run -p 8080:8080 -e ASPNETCORE_URLS=http://+:8080 tryclangmcpserver --http --port 8080
+
+# Run in stdio mode for MCP client integration
+docker run -i tryclangmcpserver dotnet TryClangMcpServer.dll
+
+# Health check
+curl http://localhost:3000/health
+
+# Test compilation via Docker
+curl -X POST http://localhost:3000/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "compile_cpp",
+      "arguments": {
+        "sourceCode": "#include <iostream>\nint main() { std::cout << \"Hello Docker!\" << std::endl; return 0; }",
+        "options": "-std=c++17"
+      }
+    }
+  }'
+```
+
+The Docker image includes all necessary dependencies including libclang for Linux environments.
+
 ### MCP Tools
 
 #### compile_cpp
