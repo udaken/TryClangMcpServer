@@ -95,23 +95,26 @@ public class ClangService : IClangService
                 context.Index, sourceFile, finalArgs, [], 
                 CXTranslationUnit_Flags.CXTranslationUnit_DetailedPreprocessingRecord);
             
+            bool usedFallback = false;
             if (context.TranslationUnit?.Handle == IntPtr.Zero)
             {
                 _logger.LogError("Failed to create translation unit for {Operation}. SourceFile: {SourceFile}, Args: [{Args}]", 
                     operationName, sourceFile, string.Join(", ", finalArgs));
                 
-                // Try with minimal arguments for basic C++
-                var basicArgs = new[] { "-std=c++17", "-x", "c++" };
+                // Try with minimal arguments but still include error detection
+                var basicArgs = new[] { "-std=c++17", "-x", "c++", "-Wall" };
                 _logger.LogDebug("Attempting fallback with basic args: [{BasicArgs}]", string.Join(", ", basicArgs));
                 
                 context.TranslationUnit = CXTranslationUnit.Parse(
-                    context.Index, sourceFile, basicArgs, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
+                    context.Index, sourceFile, basicArgs, [], 
+                    CXTranslationUnit_Flags.CXTranslationUnit_DetailedPreprocessingRecord);
                     
                 if (context.TranslationUnit?.Handle == IntPtr.Zero)
                 {
                     return ClangResult<T>.Fail($"Failed to create translation unit for {operationName} (both normal and fallback attempts failed)");
                 }
                 
+                usedFallback = true;
                 _logger.LogWarning("{Operation} completed using fallback method", operationName);
             }
             
@@ -123,7 +126,7 @@ public class ClangService : IClangService
             
             var result = operation switch
             {
-                ClangOperation.Compile => (T)(object)CreateCompilationResult(context.TranslationUnit.Value),
+                ClangOperation.Compile => (T)(object)CreateCompilationResult(context.TranslationUnit.Value, usedFallback),
                 ClangOperation.Analyze => (T)(object)CreateAnalysisResult(context.TranslationUnit.Value),
                 ClangOperation.GenerateAST => (T)(object)await CreateAstResultAsync(context.TranslationUnit.Value),
                 _ => throw new ArgumentException($"Unknown operation: {operation}", nameof(operation))
@@ -210,12 +213,14 @@ public class ClangService : IClangService
     /// <summary>
     /// Creates compilation result object
     /// </summary>
-    private CompilationResult CreateCompilationResult(CXTranslationUnit translationUnit)
+    private CompilationResult CreateCompilationResult(CXTranslationUnit translationUnit, bool usedFallback = false)
     {
         var diagnostics = GetDiagnostics(translationUnit);
+        
         // Success: true only when there are 0 errors and no fatal errors
         bool hasFatal = diagnostics.Any(d => d.Severity == "Fatal");
         var errorCount = diagnostics.Count(d => d.Severity is "Error" or "Fatal");
+        
         
         return new CompilationResult(
             Success: errorCount == 0 && !hasFatal,
@@ -268,6 +273,8 @@ public class ClangService : IClangService
         var diagnostics = new List<ClangDiagnostic>();
         var diagnosticsCount = translationUnit.NumDiagnostics;
         
+        _logger.LogDebug("Translation unit has {DiagnosticsCount} diagnostics", diagnosticsCount);
+        
         for (uint i = 0; i < diagnosticsCount; i++)
         {
             using var diagnostic = translationUnit.GetDiagnostic(i);
@@ -277,13 +284,58 @@ public class ClangService : IClangService
             location.GetFileLocation(out var file, out var line, out var column, out _);
             var fileName = file.Name.CString ?? _options.DefaultSourceFileName;
             
-            diagnostics.Add(new ClangDiagnostic(
-                Severity: severity.ToString(),
+            var severityString = severity switch
+            {
+                CXDiagnosticSeverity.CXDiagnostic_Error => "Error",
+                CXDiagnosticSeverity.CXDiagnostic_Fatal => "Fatal",
+                CXDiagnosticSeverity.CXDiagnostic_Warning => "Warning",
+                CXDiagnosticSeverity.CXDiagnostic_Note => "Note",
+                CXDiagnosticSeverity.CXDiagnostic_Ignored => "Ignored",
+                _ => severity.ToString()
+            };
+            
+            var diagnosticInfo = new ClangDiagnostic(
+                Severity: severityString,
                 Message: message ?? "Unknown error",
                 File: fileName,
                 Line: line,
                 Column: column
-            ));
+            );
+            
+            diagnostics.Add(diagnosticInfo);
+            
+            _logger.LogDebug("Diagnostic {Index}: {Severity} - {Message} at {Line}:{Column}", 
+                i, severity, message, line, column);
+        }
+
+        // Handle case where translation unit creation succeeded but should have failed
+        // This can happen with very permissive parsing modes
+        if (diagnostics.Count == 0 && translationUnit.Handle != IntPtr.Zero)
+        {
+            // Try to detect if this is actually invalid code by checking the translation unit's cursor
+            var cursor = translationUnit.Cursor;
+            if (cursor.Kind == CXCursorKind.CXCursor_TranslationUnit)
+            {
+                // Check if the translation unit has any valid function declarations
+                bool hasValidDeclarations = false;
+                
+                unsafe
+                {
+                    cursor.VisitChildren((child, parent, data) =>
+                    {
+                        if (child.Kind == CXCursorKind.CXCursor_FunctionDecl)
+                        {
+                            hasValidDeclarations = true;
+                        }
+                        return CXChildVisitResult.CXChildVisit_Continue;
+                    }, default(CXClientData));
+                }
+                
+                // If we have no diagnostics but also no valid declarations, something might be wrong
+                // This is a heuristic - in a real scenario you might want more sophisticated analysis
+                _logger.LogDebug("Translation unit validation: HasValidDeclarations={HasValidDeclarations}, DiagnosticsCount={DiagnosticsCount}",
+                    hasValidDeclarations, diagnostics.Count);
+            }
         }
 
         // Handle case where translation unit failed to create but no diagnostics were generated

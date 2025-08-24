@@ -69,26 +69,25 @@ if (useHttpMode)
     var port = GetPortFromArgs(args) ?? 3000;
     app.Urls.Add($"http://localhost:{port}");
     
-    Console.WriteLine($"🚀 MCP Server running in HTTP mode on http://localhost:{port}");
-    Console.WriteLine("📋 Available endpoints:");
-    Console.WriteLine($"  • Health: GET http://localhost:{port}/health");
-    Console.WriteLine($"  • Tools: POST http://localhost:{port}/mcp");
-    Console.WriteLine("📝 Example requests:");
-    Console.WriteLine("  • List tools: POST /mcp with {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
-    Console.WriteLine("  • Call tool: POST /mcp with {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"compile_cpp\",\"arguments\":{\"sourceCode\":\"int main(){return 0;}\"}}}");
+    // Only log to stderr in HTTP mode to avoid interfering with MCP protocol
+    Console.Error.WriteLine($"🚀 MCP Server running in HTTP mode on http://localhost:{port}");
+    Console.Error.WriteLine("📋 Available endpoints:");
+    Console.Error.WriteLine($"  • Health: GET http://localhost:{port}/health");
+    Console.Error.WriteLine($"  • Tools: POST http://localhost:{port}/mcp");
+    Console.Error.WriteLine("📝 Example requests:");
+    Console.Error.WriteLine("  • List tools: POST /mcp with {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}");
+    Console.Error.WriteLine("  • Call tool: POST /mcp with {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"compile_cpp\",\"arguments\":{\"sourceCode\":\"int main(){return 0;}\"}}}");
     
     await app.RunAsync();
 }
 else
 {
-    // Stdio mode configuration (default)
+    // Stdio mode configuration (default for Claude Desktop)
     var builder = Host.CreateApplicationBuilder(args);
     
-    builder.Logging.AddConsole(consoleLogOptions =>
-    {
-        // Configure all logs to go to stderr for stdio mode
-        consoleLogOptions.LogToStandardErrorThreshold = LogLevel.Trace;
-    });
+    // Completely disable logging in stdio mode to avoid interfering with MCP JSON protocol
+    builder.Logging.ClearProviders();
+    builder.Logging.SetMinimumLevel(LogLevel.None);
     
     builder.Services
         .AddMcpServer()

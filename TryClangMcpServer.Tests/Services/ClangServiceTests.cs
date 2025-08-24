@@ -65,6 +65,18 @@ int main() {
         Assert.That(result.Success, Is.True, "Operation should complete successfully even with compile errors");
         
         var compilationResult = ClangTestHelper.ParseClangResult(result);
+        
+        // Debug output
+        Console.WriteLine($"Compilation Success: {compilationResult.Success}");
+        Console.WriteLine($"Error Count: {compilationResult.Errors}");
+        Console.WriteLine($"Warning Count: {compilationResult.Warnings}");
+        Console.WriteLine($"Diagnostics Count: {compilationResult.Diagnostics.Count}");
+        
+        foreach (var diagnostic in compilationResult.Diagnostics)
+        {
+            Console.WriteLine($"  {diagnostic.Severity}: {diagnostic.Message} at {diagnostic.Line}:{diagnostic.Column}");
+        }
+        
         Assert.That(compilationResult.Success, Is.False, "Compilation should fail for invalid code");
         Assert.That(compilationResult.Errors, Is.GreaterThan(0), "Should have compilation errors");
     }
