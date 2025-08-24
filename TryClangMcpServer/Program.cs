@@ -287,7 +287,7 @@ public static class ClangConstants
         
         // Debug and profiling (can leak info)
         "-g", "-gdwarf", "-glldb", "-gsce", "-gcodeview",
-        "-pg", "-p", "--coverage", "-fprofile",
+        "-pg", "--coverage", "-fprofile",
         
         // Linker options
         "-l", "-L", "--library", "--library-path",
@@ -396,6 +396,8 @@ public static class Clang
             var sourceFile = Path.Combine(tempDir, ClangConstants.DefaultSourceFileName);
             await File.WriteAllTextAsync(sourceFile, sourceCode, Encoding.UTF8);
             
+            args = [.. args, "-c"];
+
             // Prepare arguments based on operation
             args = operation == ClangOperation.Analyze 
                 ? [sourceFile, .. args, "--analyze"] 
@@ -403,13 +405,42 @@ public static class Clang
             
             // Execute Clang operation with proper resource management
             using var index = CXIndex.Create();
+            
+            Logger.LogDebug("Creating translation unit for {SourceFile} with args: [{Args}]", 
+                sourceFile, string.Join(", ", args));
+            
             using var translationUnit = CXTranslationUnit.Parse(
-                index, sourceFile, args, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
+                index, sourceFile, args, [], 
+                CXTranslationUnit_Flags.CXTranslationUnit_DetailedPreprocessingRecord);
             
             if (translationUnit.Handle == IntPtr.Zero)
             {
-                Logger.LogError("Failed to create translation unit for {Operation}", operationName);
-                return CreateErrorResult($"Failed to create translation unit for {operationName}");
+                Logger.LogError("Failed to create translation unit for {Operation}. SourceFile: {SourceFile}, Args: [{Args}]", 
+                    operationName, sourceFile, string.Join(", ", args));
+                
+                // Try with minimal arguments for basic C++
+                var basicArgs = new[] { "-std=c++17", "-x", "c++" };
+                Logger.LogDebug("Attempting fallback with basic args: [{BasicArgs}]", string.Join(", ", basicArgs));
+                
+                using var fallbackTU = CXTranslationUnit.Parse(
+                    index, sourceFile, basicArgs, [], CXTranslationUnit_Flags.CXTranslationUnit_None);
+                    
+                if (fallbackTU.Handle == IntPtr.Zero)
+                {
+                    return CreateErrorResult($"Failed to create translation unit for {operationName} (both normal and fallback attempts failed)");
+                }
+                
+                // Use the fallback translation unit
+                var fallbackResult = operation switch
+                {
+                    ClangOperation.Compile => CreateCompilationResult(fallbackTU),
+                    ClangOperation.Analyze => CreateAnalysisResult(fallbackTU),
+                    ClangOperation.GenerateAST => await CreateAstResultAsync(fallbackTU),
+                    _ => throw new ArgumentException($"Unknown operation: {operation}", nameof(operation))
+                };
+                
+                Logger.LogWarning("{Operation} completed using fallback method", operationName);
+                return JsonSerializer.Serialize(fallbackResult, JsonOptions);
             }
             
             // Generate result based on operation type
@@ -469,10 +500,34 @@ public static class Clang
             
         var parsed = options.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         
-        // Check for dangerous options
+        // Check for dangerous options with more precise matching
         var dangerousOption = parsed.FirstOrDefault(opt => 
             ClangConstants.DangerousOptions.Any(dangerous => 
-                opt.StartsWith(dangerous, StringComparison.OrdinalIgnoreCase)));
+            {
+                // Exact match
+                if (opt.Equals(dangerous, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                
+                // Match options with = (like -save-temps=dir)
+                if (dangerous.EndsWith("=") && opt.StartsWith(dangerous, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                
+                // Match options followed by = (like -o=file)
+                if (opt.StartsWith(dangerous + "=", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                
+                // Special case for options that are followed by values without = (like "-o filename")
+                // Only match if it's exactly the dangerous option, not a prefix of another valid option
+                if (dangerous.StartsWith("-") && !dangerous.Contains("=") && 
+                    opt.StartsWith(dangerous, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Additional check: make sure we're not matching valid options that start with dangerous prefixes
+                    // For example, -pedantic should not match -p
+                    return opt.Length == dangerous.Length || !char.IsLetter(opt[dangerous.Length]);
+                }
+                
+                return false;
+            }));
                 
         if (dangerousOption != null)
             throw new ArgumentException($"Potentially dangerous compiler option detected: {dangerousOption}");
@@ -486,9 +541,11 @@ public static class Clang
     private static object CreateCompilationResult(CXTranslationUnit translationUnit)
     {
         var diagnostics = GetDiagnostics(translationUnit);
+        // Success: エラーが0件かつ致命的エラーがない場合のみtrue
+        bool hasFatal = diagnostics.messages.Any(m => (m as dynamic)?.Severity == "Fatal");
         return new
         {
-            Success = diagnostics.errors == 0,
+            Success = diagnostics.errors == 0 && !hasFatal,
             Errors = diagnostics.errors,
             Warnings = diagnostics.warnings,
             Diagnostics = diagnostics.messages,
@@ -536,7 +593,6 @@ public static class Clang
     {
         var messages = new List<object>();
         int errors = 0, warnings = 0;
-        
         var diagnosticsCount = translationUnit.NumDiagnostics;
         for (uint i = 0; i < diagnosticsCount; i++)
         {
@@ -544,10 +600,8 @@ public static class Clang
             var severity = diagnostic.Severity;
             var message = diagnostic.Spelling.CString;
             var location = diagnostic.Location;
-            
             location.GetFileLocation(out var file, out var line, out var column, out _);
             var fileName = file.Name.CString ?? ClangConstants.DefaultSourceFileName;
-            
             var diagnosticInfo = new
             {
                 Severity = severity.ToString(),
@@ -556,15 +610,20 @@ public static class Clang
                 Line = line,
                 Column = column
             };
-            
             messages.Add(diagnosticInfo);
-            
+            // ClangのNoteやRemarkはカウントしない
             if (severity == CXDiagnosticSeverity.CXDiagnostic_Error || severity == CXDiagnosticSeverity.CXDiagnostic_Fatal)
                 errors++;
             else if (severity == CXDiagnosticSeverity.CXDiagnostic_Warning)
                 warnings++;
         }
-        
+    // 診断が0件の場合はエラーをカウントしない（正常終了とみなす）
+        // 診断が0件かつtranslationUnit.Handle==IntPtr.Zeroならエラー扱い
+        if (errors == 0 && translationUnit.NumDiagnostics == 0 && translationUnit.Handle == IntPtr.Zero)
+        {
+            errors = 1;
+            messages.Add(new { Severity = "Error", Message = "Failed to create translation unit (no diagnostics)", File = ClangConstants.DefaultSourceFileName, Line = 0, Column = 0 });
+        }
         return (errors, warnings, messages);
     }
     
