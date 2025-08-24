@@ -21,4 +21,9 @@ public interface IClangService
     /// Generates Abstract Syntax Trees in JSON format
     /// </summary>
     Task<ClangResult<AstResult>> GetAstAsync(string sourceCode, string options = "");
+
+    /// <summary>
+    /// Preprocesses C/C++ code and returns the expanded source
+    /// </summary>
+    Task<ClangResult<PreprocessResult>> PreprocessCppAsync(string sourceCode, string options = "-std=c++20", IReadOnlyDictionary<string, string>? definitions = null);
 }

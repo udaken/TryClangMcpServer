@@ -36,7 +36,8 @@ public enum ClangOperation
 {
     Compile,
     Analyze, 
-    GenerateAST
+    GenerateAST,
+    Preprocess
 }
 
 /// <summary>
