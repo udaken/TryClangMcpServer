@@ -12,6 +12,7 @@ public static class ServiceCollectionExtensions
         
         // Register services
         services.AddScoped<IClangService, ClangService>();
+        services.AddSingleton<IRateLimitingService, InMemoryRateLimitingService>();
         
         return services;
     }
