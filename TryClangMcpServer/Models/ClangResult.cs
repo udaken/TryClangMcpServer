@@ -11,11 +11,11 @@ public record ClangResult<T>
     public T? Data { get; init; }
     public string? Error { get; init; }
     public List<ClangDiagnostic> Diagnostics { get; init; } = new();
-    
-    public static ClangResult<T> Ok(T data, List<ClangDiagnostic>? diagnostics = null) => 
+
+    public static ClangResult<T> Ok(T data, List<ClangDiagnostic>? diagnostics = null) =>
         new() { Success = true, Data = data, Diagnostics = diagnostics ?? new() };
-        
-    public static ClangResult<T> Fail(string error, List<ClangDiagnostic>? diagnostics = null) => 
+
+    public static ClangResult<T> Fail(string error, List<ClangDiagnostic>? diagnostics = null) =>
         new() { Success = false, Error = error, Diagnostics = diagnostics ?? new() };
 }
 
@@ -35,7 +35,7 @@ public record ClangDiagnostic(
 public enum ClangOperation
 {
     Compile,
-    Analyze, 
+    Analyze,
     GenerateAST,
     Preprocess
 }

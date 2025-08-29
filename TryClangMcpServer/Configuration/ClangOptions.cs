@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace TryClangMcpServer.Configuration;
 
 /// <summary>
@@ -6,20 +8,37 @@ namespace TryClangMcpServer.Configuration;
 public class ClangOptions
 {
     public const string SectionName = "Clang";
-    
+
+    [Range(1, 50)]
     public int MaxAstDepth { get; set; } = 10;
+
+    [Required]
+    [MinLength(1)]
     public string DefaultSourceFileName { get; set; } = "source.cpp";
+
+    [Range(1, 10)]
     public int CleanupRetryAttempts { get; set; } = 3;
+
+    [Range(50, 5000)]
     public int CleanupDelayMs { get; set; } = 100;
+
+    [Range(1000, 10_000_000)] // 1KB to 10MB
     public int MaxSourceCodeSizeBytes { get; set; } = 1_000_000; // 1MB
-    
+
     // Security and resource limits
+    [Range(1, 20)]
     public int MaxConcurrentOperations { get; set; } = 5;
+
+    [Range(5000, 300_000)] // 5 seconds to 5 minutes
     public int OperationTimeoutMs { get; set; } = 30_000; // 30 seconds
+
+    [Range(1, 3600)] // 1 to 3600 requests per minute
     public int RateLimitRequestsPerMinute { get; set; } = 60;
+
+    [Range(10, 100_000)] // 10 to 100,000 requests per hour
     public int MaxRequestsPerHour { get; set; } = 1000;
-    
-    public string[] DangerousOptions { get; set; } = 
+
+    public string[] DangerousOptions { get; set; } =
     {
         // File system access
         "-o", "--output", "-include", "-I", "--include-directory",

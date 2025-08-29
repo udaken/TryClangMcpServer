@@ -42,7 +42,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Compilation should succeed for valid code");
-        
+
         var compilationResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(compilationResult.Success, Is.True);
         Assert.That(compilationResult.Errors, Is.EqualTo(0), "Should have no compilation errors");
@@ -63,20 +63,20 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Operation should complete successfully even with compile errors");
-        
+
         var compilationResult = ClangTestHelper.ParseClangResult(result);
-        
+
         // Debug output
         Console.WriteLine($"Compilation Success: {compilationResult.Success}");
         Console.WriteLine($"Error Count: {compilationResult.Errors}");
         Console.WriteLine($"Warning Count: {compilationResult.Warnings}");
         Console.WriteLine($"Diagnostics Count: {compilationResult.Diagnostics.Count}");
-        
+
         foreach (var diagnostic in compilationResult.Diagnostics)
         {
             Console.WriteLine($"  {diagnostic.Severity}: {diagnostic.Message} at {diagnostic.Line}:{diagnostic.Column}");
         }
-        
+
         Assert.That(compilationResult.Success, Is.False, "Compilation should fail for invalid code");
         Assert.That(compilationResult.Errors, Is.GreaterThan(0), "Should have compilation errors");
     }
@@ -96,7 +96,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Analysis should complete successfully");
-        
+
         var analysisResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(analysisResult.Success, Is.True);
     }
@@ -115,7 +115,7 @@ int add(int a, int b) {
 
         // Assert
         Assert.That(result.Success, Is.True, "AST generation should succeed");
-        
+
         var astResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(astResult.Success, Is.True);
         Assert.That(astResult.Ast, Is.Not.Empty, "Result should contain AST data");
@@ -138,7 +138,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Preprocessing should succeed");
-        
+
         var preprocessResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(preprocessResult.Success, Is.True);
         Assert.That(preprocessResult.PreprocessedCode, Is.Not.Empty, "Result should contain preprocessed code");
@@ -162,15 +162,15 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Preprocessing should succeed");
-        
+
         var preprocessResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(preprocessResult.Success, Is.True);
-        
+
         // Note: In fallback mode (when clang command is not available), 
         // included files extraction is not fully implemented
         // So we test for either successful extraction or empty list
         Assert.That(preprocessResult.IncludedFiles, Is.Not.Null, "IncludedFiles should not be null");
-        
+
         // The preprocessed code should contain some content
         Assert.That(preprocessResult.PreprocessedCode, Is.Not.Empty, "Should have preprocessed code content");
     }
@@ -190,7 +190,7 @@ int main() {
 
         // Assert - preprocessing may fail or succeed with warnings depending on clang behavior
         var preprocessResult = ClangTestHelper.ParseClangResult(result);
-        
+
         // Either it should fail with errors or succeed with warnings about missing file
         if (!preprocessResult.Success)
         {
@@ -200,7 +200,7 @@ int main() {
         {
             Assert.That(preprocessResult.Warnings, Is.GreaterThanOrEqualTo(0), "May have warnings for missing include");
         }
-        
+
         Assert.That(preprocessResult.Diagnostics, Is.Not.Empty, "Should have diagnostics about the missing include");
     }
 
@@ -237,7 +237,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Preprocessing should succeed");
-        
+
         var preprocessResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(preprocessResult.Success, Is.True);
         Assert.That(preprocessResult.PreprocessedCode, Is.Not.Empty, "Should have preprocessed code content");
@@ -266,7 +266,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Preprocessing should succeed");
-        
+
         var preprocessResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(preprocessResult.Success, Is.True);
         Assert.That(preprocessResult.PreprocessedCode, Does.Contain("VALUE_A"), "Should contain VALUE_A definition");
@@ -298,7 +298,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Preprocessing should succeed");
-        
+
         var preprocessResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(preprocessResult.Success, Is.True);
         Assert.That(preprocessResult.PreprocessedCode, Does.Contain("DEBUG_MODE"), "Should contain DEBUG_MODE definition");
@@ -318,7 +318,7 @@ int main() {
 
         // Assert
         Assert.That(result.Success, Is.True, "Compilation with options should succeed");
-        
+
         var compilationResult = ClangTestHelper.ParseClangResult(result);
         Assert.That(compilationResult.Success, Is.True);
     }

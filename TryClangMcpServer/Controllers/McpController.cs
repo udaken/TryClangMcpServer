@@ -1,191 +1,144 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
+using TryClangMcpServer.Constants;
 using TryClangMcpServer.Models;
+using TryClangMcpServer.Models.JsonRpc;
 using TryClangMcpServer.Services;
-using System.Collections.Concurrent;
 
 namespace TryClangMcpServer.Controllers;
 
 [ApiController]
 [Route("mcp")]
 [RequestSizeLimit(1_000_000)] // 1MB request size limit
-public class McpController : ControllerBase
+public class McpController(
+    IClangService clangService,
+    IRateLimitingService rateLimitingService,
+    ILogger<McpController> logger) : ControllerBase
 {
-    private readonly IClangService _clangService;
-    private readonly IRateLimitingService _rateLimitingService;
-    private readonly ILogger<McpController> _logger;
-
-    private static readonly JsonSerializerOptions JsonOptions = new() 
-    { 
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public McpController(IClangService clangService, IRateLimitingService rateLimitingService, ILogger<McpController> logger)
+    private static readonly IReadOnlyList<ToolDefinition> SupportedTools = new List<ToolDefinition>
     {
-        _clangService = clangService;
-        _rateLimitingService = rateLimitingService;
-        _logger = logger;
-    }
+        new(JsonRpcConstants.CompileCppTool, "Compiles C/C++ code with various options and returns diagnostics",
+            new
+            {
+                type = "object",
+                properties = new
+                {
+                    sourceCode = new { type = "string", description = "The C/C++ source code to compile" },
+                    options = new { type = "string", description = "Compiler options (optional)" }
+                },
+                required = new[] { "sourceCode" }
+            }),
+        new(JsonRpcConstants.AnalyzeCppTool, "Performs static analysis using Clang Static Analyzer",
+            new
+            {
+                type = "object",
+                properties = new
+                {
+                    sourceCode = new { type = "string", description = "The C/C++ source code to analyze" },
+                    options = new { type = "string", description = "Analysis options (optional)" }
+                },
+                required = new[] { "sourceCode" }
+            }),
+        new(JsonRpcConstants.GetAstTool, "Generates Abstract Syntax Trees in JSON format",
+            new
+            {
+                type = "object",
+                properties = new
+                {
+                    sourceCode = new { type = "string", description = "The C/C++ source code to parse" },
+                    options = new { type = "string", description = "Parser options (optional)" }
+                },
+                required = new[] { "sourceCode" }
+            })
+    };
 
     [HttpPost]
-    public async Task<IActionResult> HandleMcpRequest([FromBody] JsonElement request)
+    public async ValueTask<IActionResult> HandleMcpRequest([FromBody] JsonElement request, CancellationToken cancellationToken = default)
     {
         var clientIp = GetClientIdentifier();
-        
+
         try
         {
             // Rate limiting check
-            if (!await _rateLimitingService.IsAllowedAsync(clientIp))
+            if (!await rateLimitingService.IsAllowedAsync(clientIp))
             {
-                var remainingQuota = await _rateLimitingService.GetRemainingQuotaAsync(clientIp);
-                _logger.LogWarning("Rate limit exceeded for client {ClientIp}, remaining quota: {Quota}", clientIp, remainingQuota);
-                
-                return StatusCode(429, new
-                {
-                    jsonrpc = "2.0",
-                    error = new
-                    {
-                        code = -32099, // Custom rate limit error code
-                        message = "Rate limit exceeded",
-                        data = new { remainingQuota }
-                    }
-                });
+                return await HandleRateLimitExceeded(clientIp);
             }
 
             // Validate JSON-RPC structure
             var validationResult = ValidateJsonRpcRequest(request);
             if (!validationResult.IsValid)
             {
-                _logger.LogWarning("Invalid JSON-RPC request from client {ClientIp}: {Error}", clientIp, validationResult.Error);
-                return BadRequest(new
-                {
-                    jsonrpc = "2.0",
-                    error = new
-                    {
-                        code = -32600, // Invalid Request
-                        message = validationResult.Error
-                    }
-                });
+                logger.LogWarning("Invalid JSON-RPC request from client {ClientIp}: {Error}", clientIp, validationResult.Error);
+                return BadRequest(CreateErrorResponse(GetRequestId(request), JsonRpcConstants.ErrorCodes.InvalidRequest, validationResult.Error!));
             }
 
             var requestId = GetRequestId(request);
+            var method = request.GetProperty(JsonRpcConstants.Properties.Method).GetString()!;
 
-            // Handle tools/list request
-            if (request.TryGetProperty("method", out var methodProperty) &&
-                methodProperty.GetString() == "tools/list")
+            return method switch
             {
-                _logger.LogDebug("Processing tools/list request from client {ClientIp}", clientIp);
-                
-                var toolsResponse = new
-                {
-                    jsonrpc = "2.0",
-                    id = requestId,
-                    result = new
-                    {
-                        tools = new[]
-                        {
-                            new
-                            {
-                                name = "compile_cpp",
-                                description = "Compiles C/C++ code with various options and returns diagnostics",
-                                inputSchema = new
-                                {
-                                    type = "object",
-                                    properties = new
-                                    {
-                                        sourceCode = new { type = "string", description = "The C/C++ source code to compile" },
-                                        options = new { type = "string", description = "Compiler options (optional)" }
-                                    },
-                                    required = new[] { "sourceCode" }
-                                }
-                            },
-                            new
-                            {
-                                name = "analyze_cpp",
-                                description = "Performs static analysis using Clang Static Analyzer",
-                                inputSchema = new
-                                {
-                                    type = "object",
-                                    properties = new
-                                    {
-                                        sourceCode = new { type = "string", description = "The C/C++ source code to analyze" },
-                                        options = new { type = "string", description = "Analysis options (optional)" }
-                                    },
-                                    required = new[] { "sourceCode" }
-                                }
-                            },
-                            new
-                            {
-                                name = "get_ast",
-                                description = "Generates Abstract Syntax Trees in JSON format",
-                                inputSchema = new
-                                {
-                                    type = "object",
-                                    properties = new
-                                    {
-                                        sourceCode = new { type = "string", description = "The C/C++ source code to parse" },
-                                        options = new { type = "string", description = "Parser options (optional)" }
-                                    },
-                                    required = new[] { "sourceCode" }
-                                }
-                            }
-                        }
-                    }
-                };
-                
-                return Ok(toolsResponse);
-            }
-            
-            // Handle tool calls
-            if (request.TryGetProperty("method", out var toolMethod) &&
-                toolMethod.GetString() == "tools/call")
-            {
-                var toolCallResult = await HandleToolCall(request, clientIp, requestId);
-                return Ok(toolCallResult);
-            }
-            
-            // Unsupported method
-            _logger.LogWarning("Unsupported method requested by client {ClientIp}: {Method}", 
-                clientIp, methodProperty.GetString() ?? "null");
-                
-            return BadRequest(new
-            {
-                jsonrpc = "2.0",
-                id = requestId,
-                error = new
-                {
-                    code = -32601, // Method not found
-                    message = "Method not found"
-                }
-            });
+                JsonRpcConstants.ToolsListMethod => HandleToolsList(requestId),
+                JsonRpcConstants.ToolsCallMethod => Ok(await HandleToolCall(request, clientIp, requestId, cancellationToken)),
+                _ => HandleUnsupportedMethod(clientIp, method, requestId)
+            };
         }
         catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "Invalid JSON in request from client {ClientIp}", clientIp);
-            return BadRequest(new
-            {
-                jsonrpc = "2.0",
-                error = new
-                {
-                    code = -32700, // Parse error
-                    message = "Invalid JSON"
-                }
-            });
+            logger.LogWarning(ex, "Invalid JSON in request from client {ClientIp}", clientIp);
+            return BadRequest(CreateErrorResponse(1, JsonRpcConstants.ErrorCodes.ParseError, "Invalid JSON"));
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error processing request from client {ClientIp}: {Message}", clientIp, ex.Message);
-            return StatusCode(500, new
-            {
-                jsonrpc = "2.0",
-                error = new
-                {
-                    code = -32603, // Internal error
-                    message = "Internal server error"
-                }
-            });
+            logger.LogError(ex, "Unexpected error processing request from client {ClientIp}: {Message}", clientIp, ex.Message);
+            return StatusCode(500, CreateErrorResponse(GetRequestId(request), JsonRpcConstants.ErrorCodes.InternalError, "Internal server error"));
         }
+    }
+
+    private async ValueTask<IActionResult> HandleRateLimitExceeded(string clientIp)
+    {
+        var remainingQuota = await rateLimitingService.GetRemainingQuotaAsync(clientIp);
+        logger.LogWarning("Rate limit exceeded for client {ClientIp}, remaining quota: {Quota}", clientIp, remainingQuota);
+
+        return StatusCode(429, new JsonRpcResponse(
+            JsonRpcConstants.Version,
+            0,
+            Error: new JsonRpcError(
+                JsonRpcConstants.ErrorCodes.RateLimitExceeded,
+                "Rate limit exceeded",
+                new { remainingQuota })));
+    }
+
+    private IActionResult HandleToolsList(int requestId)
+    {
+        logger.LogDebug("Processing tools/list request");
+
+        var response = new JsonRpcResponse(
+            JsonRpcConstants.Version,
+            requestId,
+            Result: new
+            {
+                tools = SupportedTools.Select(tool => new
+                {
+                    name = tool.Name,
+                    description = tool.Description,
+                    inputSchema = tool.InputSchema
+                })
+            });
+
+        return Ok(response);
+    }
+
+    private IActionResult HandleUnsupportedMethod(string clientIp, string method, int requestId)
+    {
+        logger.LogWarning("Unsupported method requested by client {ClientIp}: {Method}", clientIp, method);
+        return BadRequest(CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.MethodNotFound, "Method not found"));
     }
 
     private string GetClientIdentifier()
@@ -195,7 +148,7 @@ public class McpController : ControllerBase
         if (!string.IsNullOrEmpty(forwardedFor))
         {
             // Take the first IP in the chain (original client)
-            var firstIp = forwardedFor.Split(',').FirstOrDefault()?.Trim();
+            var firstIp = forwardedFor.Split(',', StringSplitOptions.TrimEntries).FirstOrDefault();
             if (!string.IsNullOrEmpty(firstIp))
                 return firstIp;
         }
@@ -207,95 +160,87 @@ public class McpController : ControllerBase
         return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
 
-    private static (bool IsValid, string? Error) ValidateJsonRpcRequest(JsonElement request)
+    private static ValidationResult ValidateJsonRpcRequest(JsonElement request)
     {
         // Check for required JSON-RPC version
-        if (!request.TryGetProperty("jsonrpc", out var versionElement))
-            return (false, "Missing 'jsonrpc' property");
+        if (!request.TryGetProperty(JsonRpcConstants.Properties.JsonRpc, out var versionElement))
+            return ValidationResult.Failure($"Missing '{JsonRpcConstants.Properties.JsonRpc}' property");
 
-        if (versionElement.GetString() != "2.0")
-            return (false, "Invalid JSON-RPC version, must be '2.0'");
+        if (versionElement.GetString() != JsonRpcConstants.Version)
+            return ValidationResult.Failure($"Invalid JSON-RPC version, must be '{JsonRpcConstants.Version}'");
 
         // Check for required method
-        if (!request.TryGetProperty("method", out var methodElement))
-            return (false, "Missing 'method' property");
+        if (!request.TryGetProperty(JsonRpcConstants.Properties.Method, out var methodElement))
+            return ValidationResult.Failure($"Missing '{JsonRpcConstants.Properties.Method}' property");
 
         var method = methodElement.GetString();
         if (string.IsNullOrEmpty(method))
-            return (false, "Method cannot be null or empty");
+            return ValidationResult.Failure("Method cannot be null or empty");
 
         // Validate method names
-        if (method != "tools/list" && method != "tools/call")
-            return (false, $"Unsupported method: {method}");
+        if (method != JsonRpcConstants.ToolsListMethod && method != JsonRpcConstants.ToolsCallMethod)
+            return ValidationResult.Failure($"Unsupported method: {method}");
 
         // For tools/call, validate params structure
-        if (method == "tools/call")
+        if (method == JsonRpcConstants.ToolsCallMethod)
         {
-            if (!request.TryGetProperty("params", out var paramsElement))
-                return (false, "Missing 'params' property for tools/call");
+            if (!request.TryGetProperty(JsonRpcConstants.Properties.Params, out var paramsElement))
+                return ValidationResult.Failure($"Missing '{JsonRpcConstants.Properties.Params}' property for {JsonRpcConstants.ToolsCallMethod}");
 
-            if (!paramsElement.TryGetProperty("name", out _))
-                return (false, "Missing 'name' property in params");
+            if (!paramsElement.TryGetProperty(JsonRpcConstants.Properties.Name, out _))
+                return ValidationResult.Failure($"Missing '{JsonRpcConstants.Properties.Name}' property in params");
 
-            if (!paramsElement.TryGetProperty("arguments", out _))
-                return (false, "Missing 'arguments' property in params");
+            if (!paramsElement.TryGetProperty(JsonRpcConstants.Properties.Arguments, out _))
+                return ValidationResult.Failure($"Missing '{JsonRpcConstants.Properties.Arguments}' property in params");
         }
 
-        return (true, null);
+        return ValidationResult.Success();
     }
 
-    private static int GetRequestId(JsonElement request)
-    {
-        return request.TryGetProperty("id", out var idProp) && idProp.TryGetInt32(out var id) 
-            ? id : 1;
-    }
+    private static int GetRequestId(JsonElement request) =>
+        request.TryGetProperty(JsonRpcConstants.Properties.Id, out var idProp) && idProp.TryGetInt32(out var id) ? id : 1;
 
-    private async Task<object> HandleToolCall(JsonElement request, string clientIp, int requestId)
+    private async ValueTask<JsonRpcResponse> HandleToolCall(JsonElement request, string clientIp, int requestId, CancellationToken cancellationToken)
     {
         try
         {
-            var paramsElement = request.GetProperty("params");
-            var toolName = paramsElement.GetProperty("name").GetString();
-            var arguments = paramsElement.GetProperty("arguments");
+            var paramsElement = request.GetProperty(JsonRpcConstants.Properties.Params);
+            var toolName = paramsElement.GetProperty(JsonRpcConstants.Properties.Name).GetString();
+            var arguments = paramsElement.GetProperty(JsonRpcConstants.Properties.Arguments);
 
             // Validate tool name
             if (string.IsNullOrEmpty(toolName))
             {
-                return CreateErrorResponse(requestId, -32602, "Invalid tool name");
+                return CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.InvalidParams, "Invalid tool name");
             }
 
             // Validate arguments structure
-            if (!arguments.TryGetProperty("sourceCode", out var sourceCodeElement))
+            if (!arguments.TryGetProperty(JsonRpcConstants.Properties.SourceCode, out var sourceCodeElement))
             {
-                return CreateErrorResponse(requestId, -32602, "Missing 'sourceCode' argument");
+                return CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.InvalidParams, $"Missing '{JsonRpcConstants.Properties.SourceCode}' argument");
             }
 
             var sourceCode = sourceCodeElement.GetString() ?? "";
-            var options = arguments.TryGetProperty("options", out var opts) ? opts.GetString() ?? "" : "";
+            var options = arguments.TryGetProperty(JsonRpcConstants.Properties.Options, out var opts) ? opts.GetString() ?? "" : "";
 
             // Additional validation
             if (string.IsNullOrEmpty(sourceCode))
             {
-                return CreateErrorResponse(requestId, -32602, "Source code cannot be empty");
+                return CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.InvalidParams, "Source code cannot be empty");
             }
 
-            _logger.LogDebug("Processing tool call '{ToolName}' from client {ClientIp}, source code length: {Length}", 
+            logger.LogDebug("Processing tool call '{ToolName}' from client {ClientIp}, source code length: {Length}",
                 toolName, clientIp, sourceCode.Length);
 
-            // Execute the tool
-            object result = toolName switch
-            {
-                "compile_cpp" => await _clangService.CompileCppAsync(sourceCode, options),
-                "analyze_cpp" => await _clangService.AnalyzeCppAsync(sourceCode, options),
-                "get_ast" => await _clangService.GetAstAsync(sourceCode, options),
-                _ => throw new ArgumentException($"Unknown tool: {toolName}")
-            };
+            // Execute the tool using pattern matching
+            var result = await ExecuteTool(toolName, sourceCode, options, cancellationToken);
 
-            var toolResponse = new
-            {
-                jsonrpc = "2.0",
-                id = requestId,
-                result = new
+            logger.LogDebug("Successfully processed tool call '{ToolName}' for client {ClientIp}", toolName, clientIp);
+
+            return new JsonRpcResponse(
+                JsonRpcConstants.Version,
+                requestId,
+                Result: new
                 {
                     content = new[]
                     {
@@ -305,40 +250,34 @@ public class McpController : ControllerBase
                             text = JsonSerializer.Serialize(result, JsonOptions)
                         }
                     }
-                }
-            };
-
-            _logger.LogDebug("Successfully processed tool call '{ToolName}' for client {ClientIp}", toolName, clientIp);
-            return toolResponse;
+                });
         }
         catch (KeyNotFoundException ex)
         {
-            _logger.LogWarning(ex, "Missing required property in tool call from client {ClientIp}", clientIp);
-            return CreateErrorResponse(requestId, -32602, "Invalid params structure");
+            logger.LogWarning(ex, "Missing required property in tool call from client {ClientIp}", clientIp);
+            return CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.InvalidParams, "Invalid params structure");
         }
         catch (ArgumentException ex)
         {
-            _logger.LogWarning(ex, "Invalid tool or arguments from client {ClientIp}: {Message}", clientIp, ex.Message);
-            return CreateErrorResponse(requestId, -32602, ex.Message);
+            logger.LogWarning(ex, "Invalid tool or arguments from client {ClientIp}: {Message}", clientIp, ex.Message);
+            return CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.InvalidParams, ex.Message);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error executing tool call from client {ClientIp}: {Message}", clientIp, ex.Message);
-            return CreateErrorResponse(requestId, -32603, "Tool execution failed");
+            logger.LogError(ex, "Error executing tool call from client {ClientIp}: {Message}", clientIp, ex.Message);
+            return CreateErrorResponse(requestId, JsonRpcConstants.ErrorCodes.InternalError, "Tool execution failed");
         }
     }
 
-    private static object CreateErrorResponse(int requestId, int errorCode, string message)
-    {
-        return new
+    private async ValueTask<object> ExecuteTool(string toolName, string sourceCode, string options, CancellationToken cancellationToken) =>
+        toolName switch
         {
-            jsonrpc = "2.0",
-            id = requestId,
-            error = new
-            {
-                code = errorCode,
-                message
-            }
+            JsonRpcConstants.CompileCppTool => await clangService.CompileCppAsync(sourceCode, options),
+            JsonRpcConstants.AnalyzeCppTool => await clangService.AnalyzeCppAsync(sourceCode, options),
+            JsonRpcConstants.GetAstTool => await clangService.GetAstAsync(sourceCode, options),
+            _ => throw new ArgumentException($"Unknown tool: {toolName}")
         };
-    }
+
+    private static JsonRpcResponse CreateErrorResponse(int requestId, int errorCode, string message) =>
+        new(JsonRpcConstants.Version, requestId, Error: new JsonRpcError(errorCode, message));
 }

@@ -42,12 +42,12 @@ public sealed class ClangOperationContext : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        
+
         try
         {
             _translationUnit?.Dispose();
             _index?.Dispose();
-            
+
             await CleanupDirectoryAsync();
         }
         catch (Exception ex)
@@ -58,15 +58,15 @@ public sealed class ClangOperationContext : IAsyncDisposable
         {
             _disposed = true;
         }
-        
+
         GC.SuppressFinalize(this);
     }
 
-    private async Task CleanupDirectoryAsync()
+    private async ValueTask CleanupDirectoryAsync()
     {
-        if (!Directory.Exists(_tempDirectory)) 
+        if (!Directory.Exists(_tempDirectory))
             return;
-        
+
         for (int attempts = 0; attempts < _options.CleanupRetryAttempts; attempts++)
         {
             try
@@ -77,7 +77,7 @@ public sealed class ClangOperationContext : IAsyncDisposable
             }
             catch (IOException ex) when (attempts < _options.CleanupRetryAttempts - 1)
             {
-                _logger.LogDebug(ex, "Failed to cleanup directory (attempt {Attempt}/{Total}), retrying...", 
+                _logger.LogDebug(ex, "Failed to cleanup directory (attempt {Attempt}/{Total}), retrying...",
                     attempts + 1, _options.CleanupRetryAttempts);
                 await Task.Delay(_options.CleanupDelayMs);
             }
@@ -87,8 +87,8 @@ public sealed class ClangOperationContext : IAsyncDisposable
                 break;
             }
         }
-        
-        _logger.LogWarning("Failed to cleanup temporary directory after {Attempts} attempts: {Directory}", 
+
+        _logger.LogWarning("Failed to cleanup temporary directory after {Attempts} attempts: {Directory}",
             _options.CleanupRetryAttempts, _tempDirectory);
     }
 

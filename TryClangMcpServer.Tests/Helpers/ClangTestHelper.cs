@@ -14,13 +14,13 @@ public static class ClangTestHelper
     {
         if (!result.Success)
             throw new InvalidOperationException($"Clang operation failed: {result.Error}");
-            
+
         return result.Data ?? throw new InvalidOperationException("Result data is null");
     }
-    
+
     public static bool? GetBooleanProperty(JsonElement element, string propertyName)
     {
-        return element.TryGetProperty(propertyName, out var property) && 
+        return element.TryGetProperty(propertyName, out var property) &&
                (property.ValueKind == JsonValueKind.True || property.ValueKind == JsonValueKind.False)
             ? property.GetBoolean()
             : null;
@@ -32,7 +32,7 @@ public static class ClangTestHelper
             ? property.GetInt32()
             : null;
     }
-    
+
     public static string? GetStringProperty(JsonElement element, string propertyName)
     {
         return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String

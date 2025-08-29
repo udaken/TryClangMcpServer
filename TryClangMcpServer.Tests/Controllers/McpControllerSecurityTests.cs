@@ -23,7 +23,7 @@ public class McpControllerSecurityTests
     public void Setup()
     {
         Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Testing");
-        
+
         _factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
@@ -33,11 +33,11 @@ public class McpControllerSecurityTests
                     services.Configure<ClangOptions>(options =>
                     {
                         options.RateLimitRequestsPerMinute = 2;
-                        options.MaxRequestsPerHour = 5;
+                        options.MaxRequestsPerHour = 20; // Must be >= 10 per validation range
                     });
                 });
             });
-        
+
         _client = _factory.CreateClient();
     }
 
@@ -71,7 +71,7 @@ public class McpControllerSecurityTests
 
         var errorContent = await response3.Content.ReadAsStringAsync();
         var errorResponse = JsonSerializer.Deserialize<JsonElement>(errorContent);
-        
+
         Assert.That(errorResponse.TryGetProperty("error", out var error), Is.True);
         Assert.That(error.TryGetProperty("code", out var code), Is.True);
         Assert.That(code.GetInt32(), Is.EqualTo(-32099), "Should return rate limit error code");
@@ -92,10 +92,10 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
-        
+
         var errorContent = await response.Content.ReadAsStringAsync();
         var errorResponse = JsonSerializer.Deserialize<JsonElement>(errorContent);
-        
+
         Assert.That(errorResponse.TryGetProperty("error", out var error), Is.True);
         Assert.That(error.TryGetProperty("code", out var code), Is.True);
         Assert.That(code.GetInt32(), Is.EqualTo(-32600), "Should return invalid request error code");
@@ -115,10 +115,10 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
-        
+
         var errorContent = await response.Content.ReadAsStringAsync();
         var errorResponse = JsonSerializer.Deserialize<JsonElement>(errorContent);
-        
+
         Assert.That(errorResponse.TryGetProperty("error", out var error), Is.True);
         Assert.That(error.TryGetProperty("message", out var message), Is.True);
         Assert.That(message.GetString(), Does.Contain("method"));
@@ -133,9 +133,9 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
-        
+
         var errorContent = await response.Content.ReadAsStringAsync();
-        
+
         // ASP.NET Core model binding handles JSON parsing errors before reaching the controller
         // so the response format is different - it doesn't have the JSON-RPC error structure
         Assert.That(errorContent, Is.Not.Empty);
@@ -157,10 +157,10 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.BadRequest));
-        
+
         var errorContent = await response.Content.ReadAsStringAsync();
         var errorResponse = JsonSerializer.Deserialize<JsonElement>(errorContent);
-        
+
         Assert.That(errorResponse.TryGetProperty("error", out var error), Is.True);
         Assert.That(error.TryGetProperty("code", out var code), Is.True);
         Assert.That(code.GetInt32(), Is.EqualTo(-32600), "Should return invalid request error code for unsupported method");
@@ -189,10 +189,10 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK), "Request should be processed");
-        
+
         var responseContent = await response.Content.ReadAsStringAsync();
         var responseObject = JsonSerializer.Deserialize<JsonElement>(responseContent);
-        
+
         Assert.That(responseObject.TryGetProperty("error", out var error), Is.True);
         Assert.That(error.TryGetProperty("code", out var code), Is.True);
         Assert.That(code.GetInt32(), Is.EqualTo(-32602), "Should return invalid params error code");
@@ -221,10 +221,10 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK), "Request should be processed");
-        
+
         var responseContent = await response.Content.ReadAsStringAsync();
         var responseObject = JsonSerializer.Deserialize<JsonElement>(responseContent);
-        
+
         Assert.That(responseObject.TryGetProperty("error", out var error), Is.True);
         Assert.That(error.TryGetProperty("code", out var code), Is.True);
         Assert.That(code.GetInt32(), Is.EqualTo(-32602), "Should return invalid params error code");
@@ -245,10 +245,10 @@ public class McpControllerSecurityTests
         var response = await _client.PostAsync("/mcp", content);
 
         Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
-        
+
         var responseContent = await response.Content.ReadAsStringAsync();
         var responseObject = JsonSerializer.Deserialize<JsonElement>(responseContent);
-        
+
         Assert.That(responseObject.TryGetProperty("result", out var result), Is.True);
         Assert.That(result.TryGetProperty("tools", out var tools), Is.True);
         Assert.That(tools.GetArrayLength(), Is.EqualTo(3), "Should return 3 tools");
